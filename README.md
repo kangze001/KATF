@@ -1,7 +1,6 @@
 # KATF
 
 **A Method for Malicious Bot Traffic Behavior Recognition**
-（用于恶意 Bot 流量行为识别的方法）
 
 ## Dependencies
 
