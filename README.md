@@ -13,7 +13,7 @@ This project is implemented using PyTorch and has been tested on the following h
 
 ## Datasets
 
-We will publicly release our self-simulated **Bot Traffic Dataset** after the paper is published.
+We will publicly release our self-simulated Bot Traffic Dataset after the paper is published. In addition, we will also make the script programs used to simulate the bot traffic publicly available.
 
 ## Experiments
 
