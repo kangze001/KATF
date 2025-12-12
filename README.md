@@ -18,7 +18,7 @@ We will publicly release our self-simulated **Bot Traffic Dataset** after the pa
 
 ## Experiments
 
-For offline testing or real-time deployment using our self-built Bot Traffic Dataset, please use the **MSTF (Multi-Scale Traffic Aggregation Matrix)** features for training and inference. This is necessary to validate the real-time testing capabilities of our KATF model.
+For offline testing or real-time deployment using our self-built Bot Traffic Dataset, please use the **MSTF (Multi-Scale Traffic Temporal Fingerprinting)** features for training and inference. This is necessary to validate the real-time testing capabilities of our KATF model.
 
 However, for public datasets such as **CW, OW, WTF-PAD, Front, Walkie-Talkie, and TrafficSliver**, you **must not** use the MSTF features, as they will not be suitable. For these public datasets, only the **raw time-series features** should be used.
 
