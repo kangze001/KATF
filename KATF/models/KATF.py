@@ -1,161 +1,168 @@
 import torch
 import torch.nn as nn
-import math
 
-class KATF(nn.Module):
+class RobustNeuralKalmanFilter(nn.Module):
     """
-    KATF Model for flow classification.
-    The model combines 1D CNN for feature extraction, Bi-LSTM for sequence modeling,
-    a Kalman Net for state estimation/filtering, and an Attention mechanism for final context vector generation.
+    Neural Kalman Filter module (NKF)
+    Implements the full recursive update of P, K, Q, R
+    to refine the hidden states of the Bi-LSTM.
+    """
+    def __init__(self, hidden_dim):
+        super(RobustNeuralKalmanFilter, self).__init__()
+        self.hidden_dim = hidden_dim
+        
+        # Noise prediction network: dynamically estimates process noise Q and measurement noise R
+        self.noise_net = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.Softplus()  # ensures positive variance and numerical stability
+        )
+
+    def forward(self, lstm_out):
+        batch_size, seq_len, h_dim = lstm_out.size()
+        
+        # 1. Dynamically predict noise parameters for all time steps
+        noise_params = self.noise_net(lstm_out)
+        Q_all = noise_params[:, :, :h_dim]
+        R_all = noise_params[:, :, h_dim:]
+        
+        # 2. Initialize state estimation and covariance
+        # Initial state is set to the first LSTM output, initial uncertainty P = 0.1
+        state = lstm_out[:, 0, :].clone()
+        P = torch.ones_like(state) * 0.1 
+        
+        filtered_states = []
+        
+        for t in range(seq_len):
+            # Use current LSTM output as observation z
+            z = lstm_out[:, t, :]
+            
+            # --- Prediction step ---
+            # x_pred = x (F = I)
+            # P_pred = P + Q
+            P_pred = P + Q_all[:, t, :]
+            
+            # --- Update step ---
+            # Kalman gain K = P_pred / (P_pred + R)
+            K = P_pred / (P_pred + R_all[:, t, :] + 1e-6)
+            
+            # State update: x = x_pred + K * (z - x_pred)
+            state = state + K * (z - state)
+            
+            # Covariance update: P = (1 - K) * P_pred
+            P = (1.0 - K) * P_pred
+            
+            filtered_states.append(state)
+            
+        return torch.stack(filtered_states, dim=1)
+
+
+class KATFModel(nn.Module):
+    """
+    Full KATF model with ablation switches:
+    - use_kalman: enable/disable neural Kalman state refinement
+    - use_attention: enable/disable attention mechanism
+                     (if disabled, global average pooling is used)
     """
     def __init__(self, input_channels=6, sequence_length=1950, hidden_dim=256, 
-                 num_layers=3, num_classes=4, device='cuda', verbose=True):
-        super(KATF, self).__init__()
+                 num_layers=3, num_classes=4, device='cuda',
+                 use_kalman=True, use_attention=True):
+        super(KATFModel, self).__init__()
         self.device = device
-        self.verbose = verbose
-        self.conv_length = None
+        self.use_kalman = use_kalman
+        self.use_attention = use_attention
+        print(f"[📦] Model loaded: {use_kalman} {use_attention}")
         
-        # 1. Feature Extraction (1D CNN)
+        # 1. Feature extraction layer (CNN stack)
+        # Note: sequence_length default is set to 3000 according to your config
         self.feature_extractor = nn.Sequential(
             nn.Conv1d(input_channels, 48, kernel_size=25, stride=5, padding=12),
             nn.BatchNorm1d(48),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            
             nn.Conv1d(48, 96, kernel_size=15, stride=3, padding=7),
             nn.BatchNorm1d(96),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            
             nn.Conv1d(96, 192, kernel_size=7, stride=2, padding=3),
             nn.BatchNorm1d(192),
             nn.ReLU(),
-            nn.Dropout(0.15),
-            
             nn.Conv1d(192, 384, kernel_size=5, stride=1, padding=2),
             nn.BatchNorm1d(384),
             nn.ReLU()
         )
-
-        # Calculate feature sequence length after CNN layers
-        def calc_output_len(L_in, k, s, p):
-            return math.floor((L_in + 2 * p - k) / s) + 1
-
-        self.conv_length = sequence_length
-        self.conv_length = calc_output_len(self.conv_length, 25, 5, 12)
-        self.conv_length = calc_output_len(self.conv_length, 15, 3, 7)
-        self.conv_length = calc_output_len(self.conv_length, 7, 2, 3)
-        self.conv_length = calc_output_len(self.conv_length, 5, 1, 2)
         
-        if self.verbose:
-            print(f"[📏] Sequence Compression: {sequence_length} → {self.conv_length} (Ratio: {sequence_length/self.conv_length:.1f}x)")
-        
-        # 2. Sequence Modeling (Bidirectional LSTM)
+        # 2. Temporal modeling layer (Bi-LSTM)
         self.lstm = nn.LSTM(
             input_size=384,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
-            bidirectional=True
+            bidirectional=True,
+            # dropout=0.2 if num_layers > 1 else 0  # optional inter-layer dropout
         )
         
-        # 3. Kalman Network (outputs three parameters: alpha, log(Q), log(R))
-        self.kalman_net = nn.Sequential(
-            nn.Linear(hidden_dim*2, hidden_dim*4),
-            nn.ReLU(),
-            nn.Linear(hidden_dim*4, 3) # alpha (gain), log(Q), log(R)
-        )
+        # 3. Ablation component: Neural Kalman Filter
+        if self.use_kalman:
+            self.kalman_filter = RobustNeuralKalmanFilter(hidden_dim * 2)
         
-        # 4. Attention Mechanism
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_dim*2, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, 1)
-        )
+        # 4. Ablation component: Attention mechanism
+        if self.use_attention:
+            self.attention_net = nn.Sequential(
+                nn.Linear(hidden_dim * 2, 64),
+                nn.Tanh(),
+                nn.Linear(64, 1)
+            )
         
-        # 5. Classifier
+        # 5. Classification layer
+        # Enhanced classifier
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim*2, 256),
-            nn.ReLU(),
+            nn.Linear(hidden_dim * 2, 256),  # widened classifier
             nn.BatchNorm1d(256),
+            nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(256, num_classes)
         )
         
-        self._init_weights()
         self.to(device)
-        
-        if verbose:
-            print(f"[🧠] KATF Model Initialization Complete - Device: {device}")
-            print(f"    - Hidden Dimension: {hidden_dim}")
-            print(f"    - LSTM Layers: {num_layers}")
-            print(f"    - Number of Classes: {num_classes}")
-    
-    def _init_weights(self):
-        """Initializes model weights using Xavier (Linear) and Kaiming (Conv1d) initialization."""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-            elif isinstance(module, nn.Conv1d):
-                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
-    
+
     def forward(self, x):
-        batch_size = x.size(0)
+        # Input shape: (batch, input_channels, seq_len)
         
-        # 1. Feature Extraction: (B, C, L) -> (B, 384, L')
-        features = self.feature_extractor(x)
-        # Permute to (B, L', C') for LSTM input
-        features = features.permute(0, 2, 1) 
+        # CNN feature extraction
+        feat = self.feature_extractor(x)
+        feat = feat.permute(0, 2, 1)  # reshape to (batch, seq, features)
         
-        # 2. LSTM: (B, L', C') -> (B, L', 2*H)
-        lstm_out, _ = self.lstm(features)
+        # Bi-LSTM modeling
+        x, _ = self.lstm(feat) 
         
-        # 3. Kalman Net: (B, L', 2*H) -> (B, L', 3)
-        kalman_params = self.kalman_net(lstm_out)
+        # --- Ablation logic 1: Kalman refinement ---
+        if self.use_kalman:
+            x = self.kalman_filter(x)
         
-        # Extract Kalman parameters
-        alpha = torch.sigmoid(kalman_params[..., 0]) # Kalman Gain scaling
-        Q = torch.exp(kalman_params[..., 1]) # Process Noise Covariance (variance)
-        R = torch.exp(kalman_params[..., 2]) # Measurement Noise Covariance (variance)
-        
-        # 4. Kalman Filter Loop (Simplified State Space Model)
-        
-        # Initial state is the first LSTM output, ensures the state vector size is correct (2*H)
-        # Note: This is an approximation of the Measurement Update and Time Update of a full Kalman Filter
-        state = lstm_out[:, 0, :].clone() 
-        states = []
-        
-        for t in range(self.conv_length):
-            # Prediction Step (Approx): The next state is predicted to be the current state
-            predicted_state = state 
-            # Measurement (LSTM output)
-            measurement = lstm_out[:, t, :] 
+        # --- Ablation logic 2: feature aggregation ---
+        if self.use_attention:
+            # Attention-weighted aggregation
+            attn_weights = torch.softmax(self.attention_net(x), dim=1)
+            context = torch.sum(attn_weights * x, dim=1)
+        else:
+            # Baseline: global average pooling
+            context = torch.mean(x, dim=1)
             
-            # Residual (Innovation)
-            residual = measurement - predicted_state
-            
-            # Denominator (R + Q)
-            denominator = Q[:, t].unsqueeze(1) + R[:, t].unsqueeze(1)
-            denominator = torch.clamp(denominator, min=1e-6) # Stability check
-            
-            # Kalman Gain (K = alpha * Q / (Q + R))
-            # We use alpha (learned scale factor) on the calculated gain
-            K = alpha[:, t].unsqueeze(1) * (Q[:, t].unsqueeze(1) / denominator) 
-            
-            # Update Step: state = predicted_state + K * residual
-            state = predicted_state + K * residual 
-            states.append(state)
-        
-        # Kalman Filtered Output: (B, L', 2*H)
-        kalman_out = torch.stack(states, dim=1)
-        
-        # 5. Attention Mechanism
-        # Compute weights: (B, L', 2*H) -> (B, L', 1)
-        attention_weights = torch.softmax(self.attention(kalman_out), dim=1) 
-        # Weighted sum: (B, L', 2*H) * (B, L', 1) -> (B, 2*H)
-        context = torch.sum(attention_weights * kalman_out, dim=1) 
-        
-        # 6. Classifier: (B, 2*H) -> (B, num_classes)
+        # Classification output
         return self.classifier(context)
+
+
+# ==========================================
+# Example usage in training script:
+# ==========================================
+"""
+# 1. Full KATF model
+model = KATFModel(use_kalman=True, use_attention=True)
+
+# 2. Ablation: without Kalman module (w/o Kalman)
+model = KATFModel(use_kalman=False, use_attention=True)
+
+# 3. Ablation: without Attention (w/o Attention)
+model = KATFModel(use_kalman=True, use_attention=False)
+
+# 4. Baseline model (Bi-LSTM only)
+model = KATFModel(use_kalman=False, use_attention=False)
+"""
