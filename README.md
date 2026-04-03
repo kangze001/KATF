@@ -13,13 +13,10 @@ This project is implemented using PyTorch and has been tested on the following h
 
 ## Datasets
 
-We will publicly release our self-simulated Bot Traffic Dataset after the paper is published. In addition, we will also make the script programs used to simulate the bot traffic publicly available.
+Our self-simulated Bot Traffic Dataset will be made publicly available in the future. In the meantime, the data is also available by contacting the authors directly. Additionally, other publicly accessible datasets utilized in this study can be obtained via the original links provided in the cited references.
 
 ## Experiments
-
-For offline testing or real-time deployment using our self-built Bot Traffic Dataset, please use the **MSTF (Multi-Scale Traffic Temporal Fingerprinting)** features for training and inference. This is necessary to validate the real-time testing capabilities of our KATF model.
-
-However, for public datasets such as **CW, OW, WTF-PAD, Front, Walkie-Talkie, and TrafficSliver**, you **must not** use the MSTF features, as they will not be suitable. For these public datasets, only the **raw time-series features** should be used.
+For the reproduction of the experimental process, detailed comments are provided in the source code, and the entire workflow can be completed by following the instructions.
 
 ## Contact
 
